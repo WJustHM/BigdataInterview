@@ -1,7 +1,8 @@
 # BigdataInterview
-BigData Interview Skill
+### BigData Interview Skill
 
-Technology stack:
+
+* Technology stack:
 
 spark
 kafka
