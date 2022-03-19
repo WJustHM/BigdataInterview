@@ -1,1 +1,30 @@
 1. 模式  local standalone yarn messos 
+
+spark主要分为驱动器和执行器
+1. driver驱动器
+执行main方法的进程
+创建sc\rdd\
+把作业转换为DAG
+跟踪作业的执行状况
+为执行器节点分配任务
+
+2. executor执行器
+工作进程，主要负责向driver注册自己，执行分配的作业
+
+3. standalone 模式
+master+salve模式
+也有client和cluster模式，运行本地客户端，也可以master节点上
+
+4. yarn模式
+使用RS作为资源管理调度器  不用启动spark集群
+yarn-client driver运行在客户端（启动的地方本地客户端）
+yarn-cluster driver运行由rm启动applicationmaster运行向RM申请资源启动exe执行task
+
+如果想Driver运行在客户端，则采用Yarn-Client模式（客户端模式）  
+如果想Driver运行按照集群资源分配，则用Yarn-Cluster模式（集群模式）  
+
+
+
+
+
+    
