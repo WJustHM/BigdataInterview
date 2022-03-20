@@ -23,6 +23,166 @@ yarn-cluster driver运行由rm启动applicationmaster运行向RM申请资源启�
 如果想Driver运行在客户端，则采用Yarn-Client模式（客户端模式）  
 如果想Driver运行按照集群资源分配，则用Yarn-Cluster模式（集群模式）  
 
+5. RDD
+pipeline   要么全部成功要么全部失败
+分为转换操作和行动操作  转换操作返回的是一个新的RDD   行动操作是向驱动器返回结果或者写入外部文件系统
+想在多次的行动操作中重用一个RDD 可以使用cache或者persist缓存下来
+
+6. RDD属性
+一组分区  数据集的基本组成单位    可以再创建RDD的时候指定分片个数，默认是程序分配的CPU cores
+spark中以分片为单位 每个RDD都会实现自己的compute方法
+rdd转换每次都会生成一个新的RDD   他们之间类似于流水线   数据丢失分区计算失败   可以根据依赖关系重新计算丢失的分区的数据，而不是全部分区重新计算
+spark实现了两种分区方式   一个是hashpartitioner   rangepartitioner   只有对于于key-value的RDD，才会有Partitioner，非key-value的RDD的Parititioner的值是None
+
+RDD是一个应用层面的逻辑概念。一个RDD多个分片。RDD就是一个元数据记录集，记录了RDD内存所有的关系数据
+RDD的Lineage会记录RDD的元数据信息和转换行为，当该RDD的部分分区数据丢失时，它可以根据这些信息来重新运算和恢复丢失的数据分区。
+
+7. rdd弹性
+存储弹性：内存与磁盘的自动切换    
+容错弹性：数据丢失可以自动回复     
+计算的弹性：计算出错重试机制       
+分片的弹性：根据需要重新分区
+
+优先放内存
+基于RDD lineage的依赖链    一个RDD失效可以重新计算上游的RDD来重新生成
+RDD可以通过Persist持久化将RDD缓存到内存或者磁盘，当再次用到该RDD时直接读取就行。也可以将RDD进行检查点，检查点会将数据存储在HDFS中，该RDD的所有父RDD依赖都会被移除
+DAG有向无环图，可以将stage任务串行和并行执行，调度引擎自动处理stage的失败以及失败的task
+宅依赖所有的转换操作可以通过类似于管道的方式一气呵成
+如果在应用程序中多次使用同一个RDD，可以将该RDD缓存起来
+对于长时间的迭代引用，随着血缘关系越来越长，重新计算会严重影响性能，使用checkpoint持久化到存储中，这样就可以切断之前的血缘关系，因为checkpoint后的RDD不需要知道它的父RDDs了，它可以从checkpoint处拿到数据。
+
+
+8. RDD的创建方式
+集合中创建   parallelize和makeRDD  
+外部文件系统创建
+
+9. 算子
+map    map 算子可以理解为 mapPartitions 的一个高级封装而已。
+mappartitioner    可能导致OOM
+mapPartitionsWithIndex     (Int, Interator[T]) => Iterator[U]) rdd.mapPartitionsWithIndex((index,items)=>(items.map((index,_))))
+glom   讲一个分区形成一个数组，形成新的RDD类型RDD[Array[T]]
+```scala
+scala> rdd.glom().collect()
+res25: Array[Array[Int]] = Array(Array(1, 2, 3, 4), Array(5, 6, 7, 8), Array(9, 10, 11, 12), Array(13, 14, 15, 16))
+```   
+flatmap   输入一个元素 输出0-n个元素
+groupby   按照返回值分组 将相同的keyf放入一个迭代器
+```scala
+scala> group.collect
+res0: Array[(Int, Iterable[Int])] = Array((0,CompactBuffer(2, 4)), (1,CompactBuffer(1, 3)))
+```
+filter  过滤
+sample   指定随机种子sample(withReplacement, fraction, seed)  withReplacement表示是抽出的数据是否放回，true为有放回的抽样，false为无放回的抽样，seed用于指定随机数生成器种子
+distinct   map(x => (x, null)).reduceByKey((x, _) => x, numPartitions).map(_._1) 
+coalesce(numPartitions)    缩减分区书 可以指定时候shuffle
+repartition   根据分区数，重新通过网络随机洗牌所有数据。    底层调用的coalesce  shuffle=true    分区信息为空    分区hash的随机数作为key
+sortby     使用func先对数据进行处理，按照处理后的数据比较结果排序，默认为正序  底层掉的sortbykey   rangepartitioner  桶排序
+sortByKey       在一个(K,V)的RDD上调用，K必须实现Ordered接口，返回一个按照key进行排序的(K,V)的RDD 
+pipe       脚本需要放在worker节点可以访问到的位置，针对每个分区执行一个shell脚本  返回一个RDD   rdd.pipe("/opt/module/spark/pipe.sh").collect()
+mapValues   针对于(K,V)形式的类型只对V进行操作
+
+union      对源RDD和参数RDD求并集后返回一个新的RDD   
+subtract   计算差的一种函数，去除两个RDD中相同的元素，不同的RDD将保留下来
+intersection  创建两个RDD，求两个RDD的交集  
+cartesian    笛卡儿积
+zip    将两个RDD组合成Key/Value形式的RDD,这里默认两个RDD的partition数量以及元素数量都相同，否则会抛出异常。
+```scala
+scala> val rdd1 = sc.parallelize(Array(1,2,3),3)
+rdd1: org.apache.spark.rdd.RDD[Int] = ParallelCollectionRDD[1] at parallelize at <console>:24
+```  
+```scala
+scala> val rdd2 = sc.parallelize(Array("a","b","c"),3)
+rdd2: org.apache.spark.rdd.RDD[String] = ParallelCollectionRDD[2] at parallelize at <console>:24 
+```  
+（3）第一个RDD组合第二个RDD并打印  
+```scala
+scala> rdd1.zip(rdd2).collect
+res1: Array[(Int, String)] = Array((1,a), (2,b), (3,c))
+```  
+（4）第二个RDD组合第一个RDD并打印  
+```scala
+scala> rdd2.zip(rdd1).collect
+res2: Array[(String, Int)] = Array((a,1), (b,2), (c,3))
+```  
+KV类型
+partitionby    对pairRDD进行分区操作，如果原有的partionRDD和现有的partionRDD是一致的话就不进行分区， 否则会生成ShuffleRDD，即会产生shuffle过程。   shufflerdd
+groupByKey     compactbuffer combineByKeyWithClassTag ShuffledRDD    分组
+reduceByKey    combineByKeyWithClassTag  shufflerdd   聚合
+1）reduceByKey：按照key进行聚合，在shuffle之前有combine（预聚合）操作，返回结果是RDD[k,v]。  
+2）groupByKey：按照key进行分组，直接进行shuffle。
+aggregate       不用是KV的形式  局部和全局可以不一样
+fold             折叠操作，aggregate的简化操作，seqop和combop一样。
+aggregateByKey    zerovalue  combineByKeyWithClassTag  shufflerdd   聚合 rdd.aggregateByKey(0)(math.max(_,_),_+_)    zero  seqop combop （seqop和combop可以不同）  
+foldByKey        zero  seqop和combop相同   aggregateByKey的简化操作，seqop和combop相同
+combinebykey     和aggratebykey差不多  可以控制是否在map端合并   没有zerovalue
+def combineByKey[C](createCombiner: V => C, mergeValue: (C, V) => C, mergeCombiners: (C, C) => C) : RDD[(K, C)]
+def aggregateByKey[U](zeroValue: U)(seqOp: (U, V) => U,combOp: (U, U) => U): RDD[(K, U)]
+aggregateByKey和combineByKey区别：aggregateByKey直接可以创建zeroValue，而不用根据v初始化combiner，当mergevalue和createCombiner操作相同时，优先使用aggregateByKey
+cogroup       多个compactbuffer，在类型为(K,V)和(K,W)的RDD上调用，返回一个(K,(Iterable<V>,Iterable<W>))类型的RDD  
+  cg.mapValues { case Array(vs, w1s, w2s) =>
+      (vs.asInstanceOf[Iterable[V]],
+        w1s.asInstanceOf[Iterable[W1]],
+        w2s.asInstanceOf[Iterable[W2]])
+```scala
+scala> rdd.cogroup(rdd1).collect()
+res14: Array[(Int, (Iterable[String], Iterable[Int]))] = Array((1,(CompactBuffer(a),CompactBuffer(4))), (2,(CompactBuffer(b),CompactBuffer(5))), (3,(CompactBuffer(c),CompactBuffer(6))))
+```   
+join   在类型为(K,V)和(K,W)的RDD上调用，返回一个相同key对应的所有元素对在一起的(K,(V,W))的RDD   cogroup   flatMapValues  两边都有
+```scala
+scala> rdd.join(rdd1).collect()
+res13: Array[(Int, (String, Int))] = Array((1,(a,4)), (2,(b,5)), (3,(c,6)))
+```  
+reduce   通过func函数聚集RDD中的所有元素，先聚合分区内数据，再聚合分区间数据
+first    take(1)  
+takeOrdered    先局部再全局   有界优先队列    treeset也可以 
+saveAsTextFile  SparkHadoopWriter    mappartitions  NullWritable.get(), text
+
+countByKey  返回一个(K,Int)的map，表示每一个key对应的元素个数。
+foreach     在数据集的每一个元素上，运行函数func进行更新  
+toDebugString   查看RDD   lineage  下面往上看
+```scala
+scala> wordAndCount.toDebugString
+res6: String =
+(2) ShuffledRDD[23] at reduceByKey at <console>:26 []
+ +-(2) MapPartitionsRDD[22] at map at <console>:24 []
+    |  MapPartitionsRDD[21] at flatMap at <console>:24 []
+    |  /fruit.tsv MapPartitionsRDD[20] at textFile at <console>:24 []
+    |  /fruit.tsv HadoopRDD[19] at textFile at <console>:24 []
+```
+ dependencies    查看当前RDD 的依赖类型
+ ```scala
+ scala> wordAndOne.dependencies
+ res7: Seq[org.apache.spark.Dependency[_]] = List(org.apache.spark.OneToOneDependency@5d5db92b)
+ ``` 
+
+10. 宽窄依赖
+窄依赖指的是每一个父RDD的Partition最多被子RDD的一个Partition使用,**窄依赖我们形象的比喻为独生子女
+宽依赖指的是多个子RDD的Partition会依赖同一个父RDD的Partition，会引起shuffle,总结：**宽依赖我们形象的比喻为超生**   
+
+11. DAG 
+DAG(Directed Acyclic Graph)叫做有向无环图，原始的RDD通过一系列的转换就就形成了DAG，根据RDD之间的依赖关系的不同将DAG划分成不同的Stage，
+对于窄依赖，partition的转换处理在Stage中完成计算。对于宽依赖，由于有Shuffle的存在，只能在parent RDD处理完成后，才能开始接下来的计算，因此**宽依赖是划分Stage的依据**。  
+
+12. 任务划分
+Rdd任务切分中间分为：Application,Job,Stage,Task
+Application：初始化一个SparkContext即生成一个Application
+Job：一个Action算子就会生成一个Job。  
+Stage：根据RDD之间的依赖关系的不同将Job划分成不同的Stage，遇到一个宽依赖则划分一个Stage。 
+Task：Stage是一个TaskSet，将Stage划分的结果发送到不同的Executor执行即为一个Task。  切片分区
+**注意**： Application->Job->Stage-> Task每一层都是1对n的关系。
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
