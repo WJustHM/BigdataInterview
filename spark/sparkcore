@@ -171,6 +171,53 @@ Stage：根据RDD之间的依赖关系的不同将Job划分成不同的Stage，�
 Task：Stage是一个TaskSet，将Stage划分的结果发送到不同的Executor执行即为一个Task。  切片分区
 **注意**： Application->Job->Stage-> Task每一层都是1对n的关系。
 
+13. RDD缓存
+RDD通过persist方法或cache方法可以将前面的计算结果缓存，默认情况下 persist() 会把数据以序列化的形式缓存在 JVM 的堆空间中,action触发执行
+cache()=persist(StorageLevel.MEMORY_ONLY)
+
+14. checkpoint
+Spark中对于数据的保存除了持久化操作之外，还提供了一种检查点的机制，检查点（本质是通过将RDD写入Disk做检查点）是为了通过lineage做容错的辅助，lineage过长会造成容错成本过高，
+这样就不如在中间阶段做检查点容错，如果之后有节点出现问题而丢失分区，从做检查点的RDD开始重做Lineage，就会减少开销。检查点通过将数据写入到HDFS文件系统实现了RDD的检查点功能。
+在checkpoint的过程中，该RDD的所有依赖于父RDD中的信息将全部被移除。对RDD进行checkpoint操作并不会马上被执行，必须执行Action操作才能触发。单独启动一个线程执行此操作
+
+15.  分区支持HASH和RANGE
+只有KV才有分区器，非KV的RDD分区器的值是NONE
+
+16. Hash分区 
+ **HashPartitioner分区的原理**：对于给定的key，计算其hashCode，并除以分区的个数取余，如果余数小于0，则用余数+分区的个数（否则加0），最后返回的值就是这个key所属的分区ID。
+```
+  def nonNegativeMod(x: Int, mod: Int): Int = {
+    val rawMod = x % mod
+    rawMod + (if (rawMod < 0) mod else 0)
+  }
+
+```
+&emsp; **HashPartitioner分区弊端**：可能导致每个分区中数据量的不均匀，极端情况下会导致某些分区拥有RDD的全部数据。
+
+17. rangepartitioner
+&emsp; **RangePartitioner作用**：将一定范围内的数映射到某一个分区内，尽量保证每个分区中数据量的均匀，而且分区与分区之间是有序的，
+一个分区中的元素肯定都是比另一个分区内的元素小或者大，但是分区内的元素是不能保证顺序的。简单的说就是将一定范围内的数映射到某一个分区内。
+&emsp; 第一步：先重整个RDD中抽取出样本数据，将样本数据排序，计算出每个分区的最大key值，形成一个Array[KEY]类型的数组变量rangeBounds；  
+&emsp; 第二步：判断key在rangeBounds中所处的范围，给出该key值在下一个RDD中的分区id下标；该分区器要求RDD中的KEY类型必须是可以排序的。  
+
+18. 自定义分区器
+要实现自定义的分区器，你需要继承 org.apache.spark.Partitioner 类并实现下面三个方法。
+（1）numPartitions: Int:返回创建出来的分区数。  
+（2）getPartition(key: Any): Int:返回给定键的分区编号(0到numPartitions-1)。   
+（3）equals():Java判断相等性的标准方法。这个方法的实现非常重要，Spark需要用这个方法来检查你的分区器对象是否和其他分区器实例相同，这样Spark才可以判断两个RDD的分区方式是否相同。 
+
+19. 文件读取与保存 
+textFile            hadoopRDD   指定由外部存储生成的RDD的partition数量的最小值,如果没有指定,系统会使用默认值defaultMinSplits   2
+saveAsSequenceFile     SequenceFile文件是Hadoop用来存储二进制形式的key-value对而设计的一种平面文件(Flat File)。
+sequenceFile    读取Sequence文件
+objectFile        对象文件    saveAsObjectFile 
+
+
+
+
+
+
+
 
 
 
