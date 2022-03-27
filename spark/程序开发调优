@@ -1,0 +1,24 @@
+1. 尽可能复用同一个RDD
+2. RDD是父子集的关系时，对两个RDD执行了算子操作， 尽可能在同一个RDD上执行两个操作 
+3. 对多次使用的RDD进行持久化
+4. 序列化的方式可以减少持久化的数据对内存/磁盘的占用量，进而避免内存被持久化数据占用过多，从而发生频繁GC。
+5. 尽量避免使用shuffle操作
+6. broadcast+map的join, 不会导致shuffle操作
+7. 使用map-side预聚合的shuffle操作，建议使用reduceByKey或者aggregateByKey算子来替代掉groupByKey算子 
+8. 使用高性能的算子：
+使用reduceByKey/aggregateByKey替代groupByKey 
+使用mapPartitions替代普通map   
+使用foreachPartitions替代foreach
+使用filter之后进行coalesce操作   
+使用repartitionAndSortWithinPartitions替代repartition与sort类操作 
+9. 广播大变量
+10. 使用Kryo优化序列化性能
+11. 当遇到userData和events进行join时，userData比较大，而且join操作比较频繁，
+这个时候，可以先将userData调用了 partitionBy()分区，可以极大提高效率。
+12. 优化数据结构
+#### 10、程序开发调优 ：优化数据结构
+Java中，有三种类型比较耗费内存：  
+1）对象，每个Java对象都有对象头、引用等额外的信息，因此比较占用内存空间。   
+2）字符串，每个字符串内部都有一个字符数组以及长度等额外信息。         
+3）集合类型，比如HashMap、LinkedList等，因为集合类型内部通常会使用一些内部类来封装集合元素，比如Map.Entry  
+Spark官方建议，在Spark编码实现中，特别是对于算子函数中的代码，尽量不要使用上述三种数据结构，尽量使用字符串替代对象，使用原始类型（比如Int、Long）替代字符串，使用数组替代集合类型，这样尽可能地减少内存占用，从而降低GC频率，提升性能。  

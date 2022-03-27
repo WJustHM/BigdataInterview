@@ -1,0 +1,21 @@
+1. 结构化数据处理模块
+2. spark sql提供了2个编程抽象
+dataframe
+dataset
+
+3. 什么是dataframe
+一种以RDD为基础的分布式数据集，类似二维表
+
+4. dataframe与RDD 的区别
+主要在于dataframe带有schema(带有名称和类型)
+dataframe也是懒执行，性能要比RDD高，主要原因：优化的执行计划，Spark catalyst optimiser
+dataset是强类型的   可以有dataset[Car]  dataset[Person]
+dataframe是dataset的特例  dataframe=dataset[row] 
+rdd(id,name,age) datadrame( (id,name,age))  dataset(person)
+
+DataFrame其实就是对RDD的封装，所以可以直接获取内部的RDD  
+
+DataSet是具有强类型的数据集合，需要提供对应的类型信息。
+
+5. hive sql
+spark.sql("load data local inpath './ids.txt' into table aa")

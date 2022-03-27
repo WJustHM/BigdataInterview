@@ -1,0 +1,298 @@
+1. 几种部署模式
+本地：local  local[K]  local[*]
+standlone   client cluster     (master,worker)
+spark on yarn    client cluster     (rs,am)
+mesos   
+
+2. spark为什么比mapreduce快
+内存迭代计算
+dag模式
+容错机制   dag和lineage
+
+3. spark和hadoop的shuffle差异
+shufflemaptask shuffleresulttask(shufflemaptask)
+hadoop mapreduce是sort based,进入combine和reduce的records必须先进行sort，
+因为其输入数据可以通过外排得到（mapper 对每段数据先做排序，reducer 的 shuffle 对排好序的每段数据做归并）
+map(), spill(sort), merge(sort(归并)), shuffle, sort(归并), reduce()
+
+spark使用hash进行shuffle聚合，不提前进行排序
+
+4. 构建application运行环境
+sc向资源管理器（yarn、mesos,standalone）申请executor资源，资源管理器启动StandaloneExecutorbackend（Executor）
+executor向sc申请task
+sc将应用程序分发到executor
+sc构建DAG，DAGScheduler将DAG图解析为stage,每个stage有多个task，形成taskset发送给task scheduler,
+taskscheduler讲task发送到executor进行
+
+5. spark调优怎么做（分三层）
+平台层：防止不必要的jar分发。提高数据本地性，选择搞笑的存储格式parquet
+应用程序层:过滤优化，减少过多过小的任务，降低单条记录的开销，处理数据倾斜，复用缓存 reducejoin改为mapjoin 提高并发度
+JVM层：合适的资源量，启动高效的序列化方式kyro，增大off head内存
+
+6. cache和chekpoint的差异
+对于运行时间很长，下游依赖很多的算子可以进行checkpoint或者cache
+实际上就是把shufflemaptask的输出结果存放到本地磁盘
+chekpoint会单独开一个线程去计算（建议在checkpoint之前加上cache这样就不会计算两次了）
+cache虽然说也可以把数据缓存到本地，但是这是由blockmanager管理的，一旦driver manager执行结束，也就是executor所在进程停止（coarsegrainedexecutorbacked），
+缓存到磁盘的数据就会被清理掉
+
+7. 什么场景使用持久化
+某个步骤特别耗时
+计算链路特别长
+shuffle之前会持久化到磁盘，系统自动做的
+shuffle之后持久化，要进行网络传输风险很大，重新计算代价很大
+
+
+
+
+
+7. lineage和checkpoint容错机制  
+窄依赖中，如果作业失败只需要把那个分区的父RDD重新计算一边就可以
+但是宽依赖是要把父RDD的所有分区全部重新计算   成本相当高
+假设要用checckpoint来做检查点，不仅要考虑lineage是否足够长，也要考虑是否有宽依赖，对宽依赖加checkpoint是物有所值的
+cheeckpoint类似快照
+所有父RDD的依赖都会被清除
+doCheckpoint -> writeRDDToCheckpointDirectory， 注意这里会把 job 再运行一次， 如果已经cache 了，就可以直接使用缓存中的 RDD 了
+
+触发sc的runjob的时候就会出发checkpoint的操作
+    dagScheduler.runJob(rdd, cleanedFunc, partitions, callSite, resultHandler, localProperties.get)
+    progressBar.foreach(_.finishAll())
+    rdd.doCheckpoint()
+    
+checkpoint   只要不是local模式 ，dir就不能是本地文件系统，（在非local模式下，directory必须是HDFS的目录，存争议）
+checkpoint目录是RDD生成的一个唯一目录名
+    checkpointDir = Option(directory).map { dir =>
+      val path = new Path(dir, UUID.randomUUID().toString)
+      val fs = path.getFileSystem(hadoopConfiguration)
+      fs.mkdirs(path)
+      fs.getFileStatus(path).getPath.toString
+    }
+    再次执行runjob，reliableRDDcheckpointdata
+       sc.runJob(originalRDD,
+          writePartitionToCheckpointFile[T](checkpointDirPath.toString, broadcastedConf) _)
+ runjob - RDDcheckpointdata  docheckpoint -  reliableRDDcheckpointdata   docheckpoint  writeRDDToCheckpointDirectory  -markCheckpoined  斩断上游的依赖
+
+
+Spark core的checkpoint
+（1）什么时候写checkpoint数据？
+当RDD的action算子触发计算结束后会执行checkpoint。
+（3）什么时候读checkpoint数据？
+task计算失败的时候会从checkpoint读取数据进行计算。
+
+spark streaming的checkpoint
+（1）什么时候写checkpoint数据？
+在spark streaming中每generate一个batch的RDD会触发checkpoint操作。
+（2）checkpoint存储的内容？
+对于kafka的DirectKafkaInputDStreamCheckpointData，实质是重写DStreamCheckpointData的update和restore方法，
+这样checkpoint的数据就是topic，partition，fromOffset和untilOffset（起始偏移量）。
+
+ Checkpoint的局限
+Spark Streaming的checkpoint机制看起来很美好，却有一个硬伤。上文提到 最终刷到外部存储的是类Checkpoint对象序列化后的数据。
+那么在Spark Streaming application重新编译后，再去反序列化checkpoint数据就会失败。这个时候就必须新建StreamingContext。
+
+7. parquet为什么高效
+压缩比大  spark默认采用的gzip压缩   是因为parquet的gzip压缩比率最高
+作为列存储，它的优势在于取得列越少，速度越快，如果取的列很多讲失去它的意义
+实际业务中 每个业务仅读取少量的字段 parquet是一个很多的选择
+parquet和orc列存储   多基于少量列查询
+avro  行存储   多列查询 写入频繁
+
+比普通文件效率高十倍以上  大数据文件存储格式首选
+压缩效率更出色
+
+8. spark的shuffle过程
+shufflewriter
+shufflereadr
+spark map人物会为每个reduce创建对应的bucket，根据相应的partitionid得到对应的bucketid  和分区数对应 一个bucket对应一个文件blockFile
+
+
+9. 数据倾斜为什么会OOM
+倾斜为什么会OOM
+倾斜会造成慢，为什么4G的数据会OOM呢，这激起了我的好奇心。
+
+/opt/beh/core/spark/bin/spark-submit --master yarn --class com.example.sparklearn.Test 
+--num-executors 1 --executor-memory 2g --executor-cores 2 /home/hadoop/zgh/sparklearn-0.0.1-SNAPSHOT.jar
+
+这个是我的执行命令参数，每个core中相当于分配了1g的内存，而且shuffle write后写出了321M的序列化数据，这些数据将会被一个core自己独占拉取到一个task中(看我之前自己的造的4G数据的情况可知)
+然后报java.lang.OutOfMemoryError: Java heap space。这个和spark内存模型有关系，这块我会专门开一章讲解，这里简单说下原因
+原因：
+shuffer read去获取数据是会边拉取数据一边聚合，这边有一块聚合内存（executor memory * 0.2）,也就是这块内存不够
+所以当我吧executor-memory 设置成4G 也就是一个core占用2g的时候就能跑成功任务了。因为2g*0.2> 321M么
+
+10.数据本地性
+PROCESS_LOCAL是指读取缓存在本地节点的数据
+NODE_LOCAL是指读取本地节点硬盘数据
+ANY是指读取非本地节点数据
+
+11. join操作优化
+map    side  join:大表join小表时，用map join,提升效果很明显
+reduce side  join:
+spark.sql.autoBroadcastJoinThreshold（默认是10M）的时候，才会进行mapjoin。
+尽可能先缩小数据集 过滤先
+广播小数据
+打散数据  减少数据倾斜
+提高并行度
+试用相同的分区函数
+
+Spark将参与Join的两张表抽象为流式遍历表(streamIter)和查找表(buildIter)
+sort merge join      两个人表都是经过排序的  时间复杂度N！  从上一次结束的地方为下一次开始的地方
+broadcast hash join       broad  builder 在每个executor上执行 hash join，小表构建为hash table
+hash join       hash builder    表不能太大，否则内存放不下，默认是关闭的
+
+
+12. YARN执行流程
+client  向RS提交application
+RS 启动一个driver
+driver开始下载各种资源包 向RS申请资源
+rs收到请求，经资源分配信息发送给DRIVER
+driver根据收到的指令让NM启动container
+container反向向driver注册自己
+river收到 启动作业的调度计算
+
+
+13. spark on yarn的优势
+相对于standalone资源分配更细致
+yarn通过队列的方式管理作业  调整资源，实现资源的弹性管理
+
+
+14. container的理解
+作为资源分配调度的基本单位，封装了内存 CPU 
+由AM向RS申请资源，AM通知NM启动container
+
+15. partition和block的关系
+block是HDFS的最小存储单元
+partition是sparkRDD的最小单元 RDD 是由分布在各个节点上的partition组成的
+block是存储单元   partition是计算空间   
+
+16. 不需要排序的hash shuffle一定比需要排序的sort shuffle快？
+看数据量   数据小的时候    hash shuffle快于sort  shuffle
+数据量大的时候   sort buffle快于hash shuffle      hash shuffle很消耗内存  sort使用相对会更少
+
+17. spark.storage.memoryFraction含义，实际如何调优
+用于设置RDD持久化数据在Executor内存中能占的比例，默认是0.6,，默认Executor 60%的内存
+如何持久化操作比较多  这个可以调大点  尽量保存数据在内存  提高都去性能
+如果shuffle操作比较多   很多读写在JVM中  这个参数适当调小点，节约更多的内存给JVM 减少GC，在web ui 查看如果GC时间比较长，可以降低此参数的大小
+
+18. 介绍一下你对Unified Memory Management内存管理模型的理解
+Spark中的内存使用分为两部分：执行（execution）与存储（storage）。执行内存主要用于shuffles、joins、sorts和aggregations，存储内存则用于缓存或者跨节点的内部数据传输
+executormemory  这片内存区域是为了解决 shuffles,joins, sorts and aggregations 过程中为了避免频繁IO需要的buffer。 通过spark.shuffle.memoryFraction(默认 0.2) 配置。
+storagememory   这片内存区域是为了解决 block cache(就是你显示调用rdd.cache, rdd.persist等方法), 还有就是broadcasts,以及task results的存储。可以通过参数 spark.storage.memoryFraction(默认0.6)设置。  
+othermemory     给系统预留的，因为程序本身运行也是需要内存的(默认为0.2)。
+executor执行的时候，默认60%做cache，40%做task操作，persist是最根本的函数，最底层的函数。  
+
+RDD存储。当对RDD调用persist或Cache方法时，RDD的partitons会被存储到内存里，那么这块内存也就是Storage内存。
+Shuffle操作。当发生Shuffle时，需要缓冲区来存储Shuffle的输出和聚合的中间结果,该块内存称之为Execution内存。
+用户代码。用户编写的代码能够使用的内存空间，也就是其他内存(用户内存)
+https://jishuin.proginn.com/p/763bfbd32921
+
+在spark-1.6.0以上的版本，execution内存和storage内存可以相互借用，提高了内存的Spark中内存的使用率，同时也减少了OOM的情况。
+OOM的问题通常出现在execution这块内存中，因为storage这块内存在存放数据满了之后，会直接丢弃内存中旧的数据，对性能有影响但是不会有OOM的问题。
+ 
+19. 如何从Kafka中获取数据？
+1）基于Receiver的方式
+这种方式使用Receiver来获取数据。Receiver是使用Kafka的高层次Consumer API来实现的。receiver从Kafka中获取的数据都是存储在Spark Executor的内存
+中的，然后Spark Streaming启动的job会去处理那些数据。 
+2）基于Direct的方式  
+这种方式会周期性地查询Kafka，来获得每个topic+partition的最新的offset，从而定义每个batch的offset的范围。当处理数据的job启动时，就会使用Kafka的简单consumer api来
+获取Kafka指定offset范围的数据。  
+
+20. driver的功能是什么
+sc的实例，程序的入口
+申请资源 想master注册自己负责作业的调度、解析stage，将stage分发到executor
+
+21.spark 技术栈
+CORE      核心算子RDD DAG lineage cache broadcast 
+STREAMING    流失批次处理
+SQL    sql查询
+ML     机器学习
+GRAPH  图计算
+
+22.spark worker的主要工作是什么
+管理结点的资源  内存CPU 接收master发送的资源指令   worker类似与包工头   管理分配新进程    计算服务   相当于process
+向master发送心跳信息
+worker 不会运行代码  运行代码的是executor
+
+23. mapreduce和spark 都是并行计算有什么区别
+两者都是MR模型
+hadoop分为map task和reduce task，每个task在自己的进程中运行，task结束作业也就结束了
+spark一个application分为多个job，每次action就触发一次job， 每个job有镀铬stage  每个stage有多个task组成taskset   通过taskscheduler分发到executor中执行
+hadoop只有mapreduce   那种长链路会启动多个作业    频繁的IO   多个job之间的关系需要自己维护 
+spark是内存迭代计算，
+
+24. RDD的lineage为什么高效
+lazy的 不可变的  复杂度简单
+ 
+25. 为什么要进行序列化
+减少数据体积提高传输效率   反序列化会消耗CPU
+
+26. Yarn中的container是由谁负责销毁的，在Hadoop Mapreduce中container可以复用么？  
+ApplicationMaster负责销毁，在Hadoop Mapreduce不可以复用，在spark on yarn程序container可以复用。
+
+27. spark on yarn Cluster 模式下，ApplicationMaster和driver是在同一个进程么？  
+是，driver 位于ApplicationMaster进程中。该进程负责申请资源，还负责监控程序、资源的动态情况。  
+
+28. yarn里面有几种类型的container
+运行am的container，由rs申请启动
+运行各种任务的container  由am向RS申请，并由AM与NM通信启动
+
+29.一个task的map数量由谁来决定？  
+一般情况下，在输入源是文件的时候，一个task的map数量由splitSize来决定的  
+那么splitSize是由以下几个来决定的   
+goalSize = totalSize / mapreduce.job.maps(默认是2)
+minSize = max {mapred.min.split.size, minSplitSize}  
+splitSize = max (minSize, min(goalSize, dfs.block.size))  
+一个task的reduce数量，由partition决定。  
+
+
+30. spark调度器
+FiFo schedular 默认的调度器  先进先出  缺点：不适合共享集群。如果有大的app需要很多资源，那么其他app可能会一直等待。   hadoop1 默认
+第一个job优先获取所有可用的资源，接下来第二个job再获取剩余资源,以此类推，
+
+适合长作业，不适合短作业，CPU繁忙型作业
+
+Capacity schedular  计算能力调度器  选择占用内存小  优先级高的      hadoop2默认
+用于一个集群（集群被多个组织共享）中运行多个Application的情况，目标是最大化吞吐量和集群利用率
+支持多个队列  每个队列内部使用fifo
+
+Fair schedular 调度器  公平调度器  所有job 占用相同资源  
+支持多个队列   每个队列公平共享其所在队列的所有资源
+
+31. 导致executor产生full gc的原因 
+可能导致Executor僵死问题，比如说海量数据的shuffle和数据倾斜问题   shuffle伴随着大量的写操作，JVM新生代不断的GC
+Eden Space写满了就往Survivor Space写，同时超过一定大小的数据会直接写到老生代，当新生代写满了之后，也会把老的数据搞到老生代，
+如果老生代空间不足了， 就触发FULL GC，还是空间不够，那就OOM错误了，此时线程被Blocked，导致整个Executor处理数据的进程被卡住。 
+
+32.spark累加器有哪些特点
+全局唯一只增不减  在executor中修改  driver中读取
+
+33.rangepartitioner分区原理
+rangepartitioner分区尽量保证每个分区数据均匀，分区间有序，但分区内是无序的  有一个抽样的过程
+
+34.spark.shuffle.memoryFraction参数的含义
+spark.shuffle.memoryFraction是shuffle调优中 重要参数，shuffle从上一个task拉去数据过来，要在Executor进行聚合操作，
+聚合操作时使用Executor内存的比例由该参数决定，默认是20%如果聚合时数据超过了该大小，那么就会spill到磁盘，极大降低性能；
+如果Spark作业中的RDD持久化操作较少，shuffle操作较多时，建议降低持久化操作的内存占比，提高shuffle操作的内存占比比例，
+避免shuffle过程中数据过多时内存不够用，必须溢写到磁盘上，降低了性能。此外，如果发现作业由于频繁的gc导致运行缓慢，
+意味着task执行用户代码的内存不够用，那么同样建议调低这个参数的值。  
+
+35.常见的数据压缩方式
+GZIP的压缩率最高，但是其实CPU密集型的，对CPU的消耗比其他算法要多，压缩和解压速度也慢；  
+LZO的压缩率居中，比GZIP要低一些，但是压缩和解压速度明显要比GZIP快很多，其中解压速度快的更多；  
+Zippy/Snappy的压缩率最低，而压缩和解压速度要稍微比LZO要快一些。  
+
+36.Spark RDD 和 MapReduce2的区别
+mr2只有2个阶段，数据需要大量访问磁盘，数据来源相对单一
+spark RDD ,可以无数个阶段进行迭代计算，数据来源非常丰富，数据落地介质也非常丰富spark计算基于内存； 
+
+37.spark和Mapreduce快？ 为什么快呢？ 快在哪里呢？ 
+基于内存计算，减少低效的磁盘交互；
+高效的调度算法，基于DAG；  
+容错机制Lingage，主要是DAG和Lianage，即使spark不使用内存技术，也大大快于mapreduce。  
+主要是迭代计算和执行复杂作业的效率高于mapreduce
+
+38.Spark sql为什么比hive快呢？  
+计算引擎不一样，一个是spark计算模型，一个是mapreudce计算模型。  
+
+39.hbase region多大会分区，spark读取hbase数据是如何划分partition的？  
+region超过了hbase.hregion.max.filesize这个参数配置的大小就会自动裂分，默认值是1G。  
+ 默认情况下，hbase有多少个region，Spark读取时就会有多少个partition  
